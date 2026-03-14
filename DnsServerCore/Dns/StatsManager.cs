@@ -48,6 +48,22 @@ namespace DnsServerCore.Dns
         readonly DnsServer _dnsServer;
         readonly string _statsFolder;
 
+        //lifetime counters
+        long _totalQueries;
+        long _totalNoError;
+        long _totalServerFailure;
+        long _totalNxDomain;
+        long _totalRefused;
+
+        long _totalAuthoritative;
+        long _totalRecursive;
+        long _totalCached;
+        long _totalBlocked;
+        long _totalDropped;
+
+        readonly HashSet<IPAddress> _uniqueClients = new HashSet<IPAddress>(1000);
+
+        //dashboard stats
         readonly StatCounter[] _lastHourStatCounters = new StatCounter[60];
         readonly StatCounter[] _lastHourStatCountersCopy = new StatCounter[60];
         readonly ConcurrentDictionary<DateTime, HourlyStats> _hourlyStatsCache = new ConcurrentDictionary<DateTime, HourlyStats>();
@@ -127,6 +143,19 @@ namespace DnsServerCore.Dns
                         if (_disposed)
                             break;
 
+                        DnsResponseCode responseCode = item._response is null ? DnsResponseCode.NoError : item._response.RCODE;
+
+                        DnsServerResponseType responseType;
+
+                        if (item._response is null)
+                            responseType = DnsServerResponseType.Dropped;
+                        else if (item._response.Tag is null)
+                            responseType = DnsServerResponseType.Recursive;
+                        else
+                            responseType = (DnsServerResponseType)item._response.Tag;
+
+                        UpdateLifetimeCounters(responseCode, responseType, item._remoteEP.Address);
+
                         StatCounter statCounter = _lastHourStatCounters[item._timestamp.Minute];
                         if (statCounter is not null)
                         {
@@ -137,16 +166,7 @@ namespace DnsServerCore.Dns
                             else
                                 query = null;
 
-                            DnsServerResponseType responseType;
-
-                            if (item._response is null)
-                                responseType = DnsServerResponseType.Dropped;
-                            else if (item._response.Tag is null)
-                                responseType = DnsServerResponseType.Recursive;
-                            else
-                                responseType = (DnsServerResponseType)item._response.Tag;
-
-                            statCounter.Update(query, item._response is null ? DnsResponseCode.NoError : item._response.RCODE, responseType, item._remoteEP.Address, item._protocol, item._rateLimited);
+                            statCounter.Update(query, responseCode, responseType, item._remoteEP.Address, item._protocol, item._rateLimited);
                         }
 
                         if ((item._request is null) || (item._response is null))
@@ -186,7 +206,7 @@ namespace DnsServerCore.Dns
 
                     //delete hourly logs
                     {
-                        string[] hourlyStatsFiles = Directory.GetFiles(Path.Combine(_dnsServer.ConfigFolder, "stats"), "*.stat");
+                        string[] hourlyStatsFiles = Directory.GetFiles(Path.Combine(_dnsServer.ConfigFolder, "stats"), "*.stat", SearchOption.TopDirectoryOnly);
 
                         foreach (string hourlyStatsFile in hourlyStatsFiles)
                         {
@@ -212,7 +232,7 @@ namespace DnsServerCore.Dns
 
                     //delete daily logs
                     {
-                        string[] dailyStatsFiles = Directory.GetFiles(Path.Combine(_dnsServer.ConfigFolder, "stats"), "*.dstat");
+                        string[] dailyStatsFiles = Directory.GetFiles(Path.Combine(_dnsServer.ConfigFolder, "stats"), "*.dstat", SearchOption.TopDirectoryOnly);
 
                         foreach (string dailyStatsFile in dailyStatsFiles)
                         {
@@ -270,6 +290,72 @@ namespace DnsServerCore.Dns
         #endregion
 
         #region private
+
+        public void UpdateLifetimeCounters(DnsResponseCode responseCode, DnsServerResponseType responseType, IPAddress clientIpAddress)
+        {
+            _totalQueries++;
+
+            if (responseType == DnsServerResponseType.Dropped)
+            {
+                _totalDropped++;
+            }
+            else
+            {
+                switch (responseCode)
+                {
+                    case DnsResponseCode.NoError:
+                        _totalNoError++;
+                        break;
+
+                    case DnsResponseCode.ServerFailure:
+                        _totalServerFailure++;
+                        break;
+
+                    case DnsResponseCode.NxDomain:
+                        _totalNxDomain++;
+                        break;
+
+                    case DnsResponseCode.Refused:
+                        _totalRefused++;
+                        break;
+                }
+
+                switch (responseType)
+                {
+                    case DnsServerResponseType.Authoritative:
+                        _totalAuthoritative++;
+                        break;
+
+                    case DnsServerResponseType.Recursive:
+                        _totalRecursive++;
+                        break;
+
+                    case DnsServerResponseType.Cached:
+                        _totalCached++;
+                        break;
+
+                    case DnsServerResponseType.Blocked:
+                        _totalBlocked++;
+                        break;
+
+                    case DnsServerResponseType.UpstreamBlocked:
+                        _totalRecursive++;
+                        _totalBlocked++;
+                        break;
+
+                    case DnsServerResponseType.UpstreamBlockedCached:
+                        _totalCached++;
+                        _totalBlocked++;
+                        break;
+                }
+
+                if (clientIpAddress.IsIPv4MappedToIPv6)
+                    clientIpAddress = clientIpAddress.MapToIPv4();
+
+                _uniqueClients.Add(clientIpAddress);
+            }
+        }
+
 
         private void LoadLastHourStats()
         {
@@ -1567,6 +1653,39 @@ namespace DnsServerCore.Dns
 
         #region properties
 
+        public long TotalQueries
+        { get { return _totalQueries; } }
+
+        public long TotalNoError
+        { get { return _totalNoError; } }
+
+        public long TotalServerFailure
+        { get { return _totalServerFailure; } }
+
+        public long TotalNxDomain
+        { get { return _totalNxDomain; } }
+
+        public long TotalRefused
+        { get { return _totalRefused; } }
+
+        public long TotalAuthoritative
+        { get { return _totalAuthoritative; } }
+
+        public long TotalRecursive
+        { get { return _totalRecursive; } }
+
+        public long TotalCached
+        { get { return _totalCached; } }
+
+        public long TotalBlocked
+        { get { return _totalBlocked; } }
+
+        public long TotalDropped
+        { get { return _totalDropped; } }
+
+        public long TotalClients
+        { get { return _uniqueClients.Count; } }
+
         public bool EnableInMemoryStats
         {
             get { return _enableInMemoryStats; }
@@ -2037,9 +2156,6 @@ namespace DnsServerCore.Dns
 
                         case DnsResponseCode.Refused:
                             _totalRefused++;
-                            break;
-
-                        case DnsResponseCode.FormatError:
                             break;
                     }
 
