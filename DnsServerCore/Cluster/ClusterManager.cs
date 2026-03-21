@@ -1218,7 +1218,7 @@ namespace DnsServerCore.Cluster
                     continue;
 
                 foreach (IPAddress ipAddress in clusterNode.Value.IPAddresses)
-                    zoneTransferACL.Add(new NetworkAccessControl(ipAddress, 32));
+                    zoneTransferACL.Add(new NetworkAccessControl(ipAddress, (byte)(ipAddress.AddressFamily == AddressFamily.InterNetwork ? 32 : 128)));
 
                 notifyNameServers.AddRange(clusterNode.Value.IPAddresses);
             }
