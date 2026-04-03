@@ -50,6 +50,15 @@ namespace DnsServerCore.Auth
         readonly string _configFolder;
         readonly LogManager _log;
 
+        bool _ssoEnabled;
+        Uri _ssoAuthority;
+        string _ssoClientId;
+        string _ssoClientSecret;
+        Uri _ssoMetadataAddress;
+        bool _ssoAllowSignup;
+        bool _ssoAllowSignupOnlyForMappedUsers = true;
+        IReadOnlyDictionary<string, string> _ssoGroupMap;
+
         readonly Lock _saveLock = new Lock();
         bool _pendingSave;
         readonly Timer _saveTimer;
@@ -147,7 +156,7 @@ namespace DnsServerCore.Auth
 
                 using (FileStream fS = new FileStream(configFile, FileMode.Open, FileAccess.Read))
                 {
-                    ReadConfigFrom(fS, false);
+                    ReadConfigFrom(fS, false, out bool _);
                 }
 
                 _log.Write("DNS Server auth config file was loaded: " + configFile);
@@ -185,6 +194,61 @@ namespace DnsServerCore.Auth
             {
                 CreateDefaultConfig();
 
+                string strSsoEnabled = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_ENABLED");
+                if (!string.IsNullOrEmpty(strSsoEnabled))
+                    _ssoEnabled = bool.Parse(strSsoEnabled);
+
+                string strSsoAuthority = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_AUTHORITY");
+                if (!string.IsNullOrEmpty(strSsoAuthority))
+                    _ssoAuthority = new Uri(strSsoAuthority);
+
+                string strSsoClientId = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_CLIENT_ID");
+                if (!string.IsNullOrEmpty(strSsoClientId))
+                    _ssoClientId = strSsoClientId;
+
+                string strSsoClientSecret = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_CLIENT_SECRET");
+                string strSsoClientSecretFile = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_CLIENT_SECRET_FILE");
+
+                if (!string.IsNullOrEmpty(strSsoClientSecret))
+                {
+                    _ssoClientSecret = strSsoClientSecret;
+                }
+                else if (!string.IsNullOrEmpty(strSsoClientSecretFile))
+                {
+                    using (StreamReader sR = new StreamReader(strSsoClientSecretFile, true))
+                    {
+                        _ssoClientSecret = sR.ReadLine();
+                    }
+                }
+
+                string strSsoMetadataAddress = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_METADATA_ADDRESS");
+                if (!string.IsNullOrEmpty(strSsoMetadataAddress))
+                    _ssoMetadataAddress = new Uri(strSsoMetadataAddress);
+
+                string strSsoAllowSignup = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_ALLOW_SIGNUP");
+                if (!string.IsNullOrEmpty(strSsoAllowSignup))
+                    _ssoAllowSignup = bool.Parse(strSsoAllowSignup);
+
+                string strSsoAllowSignupOnlyForMappedUsers = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_ALLOW_SIGNUP_ONLY_FOR_MAPPED_USERS");
+                if (!string.IsNullOrEmpty(strSsoAllowSignupOnlyForMappedUsers))
+                    _ssoAllowSignupOnlyForMappedUsers = bool.Parse(strSsoAllowSignupOnlyForMappedUsers);
+
+                string strGroupMap = Environment.GetEnvironmentVariable("DNS_SERVER_SSO_GROUP_MAP");
+                if (!string.IsNullOrEmpty(strGroupMap))
+                {
+                    string[] entries = strGroupMap.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    Dictionary<string, string> groupMap = new Dictionary<string, string>(entries.Length);
+
+                    foreach (string entry in entries)
+                    {
+                        string[] parts = entry.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        if (parts.Length == 2)
+                            groupMap.TryAdd(parts[0], parts[1]);
+                    }
+
+                    _ssoGroupMap = groupMap;
+                }
+
                 SaveConfigFileInternal();
             }
             catch (Exception ex)
@@ -214,11 +278,11 @@ namespace DnsServerCore.Auth
             }
         }
 
-        public void LoadConfig(Stream s, bool isConfigTransfer, UserSession implantSession = null)
+        public void LoadConfig(Stream s, bool isConfigTransfer, out bool restartWebService, UserSession implantSession = null)
         {
             lock (_saveLock)
             {
-                ReadConfigFrom(s, isConfigTransfer);
+                ReadConfigFrom(s, isConfigTransfer, out restartWebService);
 
                 if (!isConfigTransfer)
                 {
@@ -293,10 +357,12 @@ namespace DnsServerCore.Auth
             }
         }
 
-        private void ReadConfigFrom(Stream s, bool isConfigTransfer)
+        private void ReadConfigFrom(Stream s, bool isConfigTransfer, out bool restartWebService)
         {
             if (Encoding.ASCII.GetString(s.ReadExactly(2)) != "AS") //format
                 throw new InvalidDataException("DNS Server auth config file format is invalid.");
+
+            restartWebService = false;
 
             ConcurrentDictionary<string, Group> groups = new ConcurrentDictionary<string, Group>(1, 4);
             ConcurrentDictionary<string, User> users = new ConcurrentDictionary<string, User>(1, 4);
@@ -309,6 +375,7 @@ namespace DnsServerCore.Auth
             switch (version)
             {
                 case 1:
+                case 2:
                     {
                         int count = bR.ReadByte();
 
@@ -349,6 +416,89 @@ namespace DnsServerCore.Auth
                                 sessions.TryAdd(session.Token, session);
                         }
                     }
+
+                    if (version >= 2)
+                    {
+                        bool ssoIsStillDisabled = false;
+
+                        bool ssoEnabled = bR.ReadBoolean();
+                        if (_ssoEnabled == ssoEnabled)
+                        {
+                            ssoIsStillDisabled = !ssoEnabled;
+                        }
+                        else
+                        {
+                            _ssoEnabled = ssoEnabled;
+                            restartWebService = true;
+                        }
+
+                        string strSsoAuthority = s.ReadShortString();
+                        Uri ssoAuthority;
+                        if (strSsoAuthority.Length == 0)
+                            ssoAuthority = null;
+                        else
+                            ssoAuthority = new Uri(strSsoAuthority);
+
+                        if (_ssoAuthority != ssoAuthority)
+                        {
+                            _ssoAuthority = ssoAuthority;
+                            restartWebService = true;
+                        }
+
+                        string ssoClientId = s.ReadShortString();
+                        if (ssoClientId.Length == 0)
+                            ssoClientId = null;
+
+                        if (_ssoClientId != ssoClientId)
+                        {
+                            _ssoClientId = ssoClientId;
+                            restartWebService = true;
+                        }
+
+                        string ssoClientSecret = s.ReadShortString();
+                        if (ssoClientSecret.Length == 0)
+                            ssoClientSecret = null;
+
+                        if (_ssoClientSecret != ssoClientSecret)
+                        {
+                            _ssoClientSecret = ssoClientSecret;
+                            restartWebService = true;
+                        }
+
+                        string strSsoMetadataAddress = s.ReadShortString();
+                        Uri ssoMetadataAddress;
+                        if (strSsoMetadataAddress.Length == 0)
+                            ssoMetadataAddress = null;
+                        else
+                            ssoMetadataAddress = new Uri(strSsoMetadataAddress);
+
+                        if (_ssoMetadataAddress != ssoMetadataAddress)
+                        {
+                            _ssoMetadataAddress = ssoMetadataAddress;
+                            restartWebService = true;
+                        }
+
+                        _ssoAllowSignup = bR.ReadBoolean();
+                        _ssoAllowSignupOnlyForMappedUsers = bR.ReadBoolean();
+
+                        {
+                            int count = bR.ReadByte();
+                            Dictionary<string, string> ssoGroupMap = new Dictionary<string, string>(count);
+
+                            for (int i = 0; i < count; i++)
+                            {
+                                string key = s.ReadShortString();
+                                string value = s.ReadShortString();
+
+                                ssoGroupMap.TryAdd(key, value);
+                            }
+
+                            _ssoGroupMap = ssoGroupMap;
+                        }
+
+                        restartWebService = !ssoIsStillDisabled && restartWebService;
+                    }
+
                     break;
 
                 default:
@@ -389,9 +539,9 @@ namespace DnsServerCore.Auth
                     switch (existingSession.Value.Type)
                     {
                         case UserSessionType.ApiToken:
-                        case UserSessionType.ClusterApiToken:
                             if (!sessions.ContainsKey(existingSession.Key))
                                 _sessions.TryRemove(existingSession);
+
                             break;
                     }
                 }
@@ -401,7 +551,6 @@ namespace DnsServerCore.Auth
                     switch (session.Value.Type)
                     {
                         case UserSessionType.ApiToken:
-                        case UserSessionType.ClusterApiToken:
                             _sessions[session.Key] = session.Value;
                             break;
                     }
@@ -419,7 +568,7 @@ namespace DnsServerCore.Auth
             BinaryWriter bW = new BinaryWriter(s);
 
             bW.Write(Encoding.ASCII.GetBytes("AS")); //format
-            bW.Write((byte)1); //version
+            bW.Write((byte)2); //version
 
             bW.Write(Convert.ToByte(_groups.Count));
 
@@ -450,6 +599,46 @@ namespace DnsServerCore.Auth
 
             foreach (UserSession session in activeSessions)
                 session.WriteTo(bW);
+
+            bW.Write(_ssoEnabled);
+
+            if (_ssoAuthority is null)
+                s.WriteShortString("");
+            else
+                s.WriteShortString(_ssoAuthority.OriginalString);
+
+            if (_ssoClientId is null)
+                s.WriteShortString("");
+            else
+                s.WriteShortString(_ssoClientId);
+
+            if (_ssoClientSecret is null)
+                s.WriteShortString("");
+            else
+                s.WriteShortString(_ssoClientSecret);
+
+            if (_ssoMetadataAddress is null)
+                s.WriteShortString("");
+            else
+                s.WriteShortString(_ssoMetadataAddress.OriginalString);
+
+            bW.Write(_ssoAllowSignup);
+            bW.Write(_ssoAllowSignupOnlyForMappedUsers);
+
+            if ((_ssoGroupMap is null) || (_ssoGroupMap.Count == 0))
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_ssoGroupMap.Count));
+
+                foreach (KeyValuePair<string, string> entry in _ssoGroupMap)
+                {
+                    s.WriteShortString(entry.Key);
+                    s.WriteShortString(entry.Value);
+                }
+            }
         }
 
         #endregion
@@ -538,9 +727,9 @@ namespace DnsServerCore.Auth
 
             User user = GetUser(username);
 
-            if ((user is null) || !user.PasswordHash.Equals(user.GetPasswordHashFor(password), StringComparison.Ordinal))
+            if ((user is null) || user.IsSsoUser || !user.PasswordHash.Equals(user.GetPasswordHashFor(password), StringComparison.Ordinal))
             {
-                if (password != "admin")
+                if ((username != "admin") || (password != "admin"))
                 {
                     MarkFailedLoginAttempt(network);
 
@@ -657,6 +846,17 @@ namespace DnsServerCore.Auth
             return null;
         }
 
+        public User GetSsoUser(string ssoIdentifier)
+        {
+            foreach (KeyValuePair<string, User> user in _users)
+            {
+                if (ssoIdentifier.Equals(user.Value.SsoIdentifier, StringComparison.Ordinal) && user.Value.IsSsoUser)
+                    return user.Value;
+            }
+
+            return null;
+        }
+
         public User CreateUser(string displayName, string username, string password, int iterations = User.DEFAULT_ITERATIONS)
         {
             if (_users.Count >= byte.MaxValue)
@@ -664,10 +864,40 @@ namespace DnsServerCore.Auth
 
             username = username.ToLowerInvariant();
 
-            User user = new User(displayName, username, password, iterations);
+            User user = User.CreateLocalUser(displayName, username, password, iterations);
 
             if (_users.TryAdd(username, user))
             {
+                if (_users.Count > byte.MaxValue)
+                {
+                    _users.TryRemove(username, out _); //undo
+                    throw new DnsWebServiceException("Cannot create more than 255 users.");
+                }
+
+                user.AddToGroup(GetGroup(Group.EVERYONE));
+                return user;
+            }
+
+            throw new DnsWebServiceException("User already exists: " + username);
+        }
+
+        public User CreateSsoUser(string displayName, string username, string ssoIdentifier)
+        {
+            if (_users.Count >= byte.MaxValue)
+                throw new DnsWebServiceException("Cannot create more than 255 users.");
+
+            username = username.ToLowerInvariant();
+
+            User user = User.CreateSsoUser(displayName, username, ssoIdentifier);
+
+            if (_users.TryAdd(username, user))
+            {
+                if (_users.Count > byte.MaxValue)
+                {
+                    _users.TryRemove(username, out _); //undo
+                    throw new DnsWebServiceException("Cannot create more than 255 users.");
+                }
+
                 user.AddToGroup(GetGroup(Group.EVERYONE));
                 return user;
             }
@@ -681,11 +911,11 @@ namespace DnsServerCore.Auth
                 return;
 
             string oldUsername = user.Username;
-            user.Username = newUsername;
+            user.SetUsername(newUsername);
 
             if (!_users.TryAdd(user.Username, user))
             {
-                user.Username = oldUsername; //revert
+                user.SetUsername(oldUsername); //revert
                 throw new DnsWebServiceException("User already exists: " + newUsername);
             }
 
@@ -765,7 +995,15 @@ namespace DnsServerCore.Auth
             Group group = new Group(name, description);
 
             if (_groups.TryAdd(name.ToLowerInvariant(), group))
+            {
+                if (_groups.Count > byte.MaxValue)
+                {
+                    _groups.TryRemove(name.ToLowerInvariant(), out _); //undo
+                    throw new DnsWebServiceException("Cannot create more than 255 groups.");
+                }
+
                 return group;
+            }
 
             throw new DnsWebServiceException("Group already exists: " + name);
         }
@@ -829,7 +1067,7 @@ namespace DnsServerCore.Auth
 
         public UserSession GetSession(string token)
         {
-            if (_sessions.TryGetValue(token, out UserSession session))
+            if ((token is not null) && _sessions.TryGetValue(token, out UserSession session))
                 return session;
 
             return null;
@@ -877,7 +1115,7 @@ namespace DnsServerCore.Auth
         public UserSession CreateSession(UserSessionType type, string tokenName, User user, IPAddress remoteAddress, string userAgent)
         {
             if (user.Disabled)
-                throw new DnsWebServiceException("Account is suspended.");
+                throw new DnsWebServiceException("User account is disabled. Please contact your administrator.");
 
             UserSession session = new UserSession(type, tokenName, user, remoteAddress, userAgent);
 
@@ -1003,6 +1241,128 @@ namespace DnsServerCore.Auth
 
         public ICollection<UserSession> Sessions
         { get { return _sessions.Values; } }
+
+        public bool SsoEnabled
+        {
+            get { return _ssoEnabled; }
+            set { _ssoEnabled = value; }
+        }
+
+        public Uri SsoAuthority
+        {
+            get { return _ssoAuthority; }
+            set
+            {
+                if (value is not null)
+                {
+                    if (value.OriginalString.Length > 255)
+                        throw new ArgumentException("The SSO Authority URL length cannot be more than 255 chars.", nameof(SsoAuthority));
+
+                    switch (value.Scheme.ToLowerInvariant())
+                    {
+                        case "http":
+                        case "https":
+                            break;
+
+                        default:
+                            throw new ArgumentException("The SSO Authority URL scheme can be 'http' or 'https' only.", nameof(SsoAuthority));
+                    }
+                }
+
+                _ssoAuthority = value;
+            }
+        }
+
+        public string SsoClientId
+        {
+            get { return _ssoClientId; }
+            set
+            {
+                if (value is not null)
+                {
+                    if (value.Length == 0)
+                        value = null;
+                    else if (value.Length > 255)
+                        throw new ArgumentException("The SSO Client ID length cannot be more than 255 chars.", nameof(SsoClientId));
+                }
+
+                _ssoClientId = value;
+            }
+        }
+
+        public string SsoClientSecret
+        {
+            get { return _ssoClientSecret; }
+            set
+            {
+                if (value is not null)
+                {
+                    if (value.Length == 0)
+                        value = null;
+                    else if (value.Length > 255)
+                        throw new ArgumentException("The SSO Client Secret length cannot be more than 255 chars.", nameof(SsoClientSecret));
+                }
+
+                _ssoClientSecret = value;
+            }
+        }
+
+        public Uri SsoMetadataAddress
+        {
+            get { return _ssoMetadataAddress; }
+            set
+            {
+                if (value is not null)
+                {
+                    if (value.OriginalString.Length > 255)
+                        throw new ArgumentException("The SSO Metadata Address URL length cannot be more than 255 chars.", nameof(SsoMetadataAddress));
+
+                    switch (value.Scheme.ToLowerInvariant())
+                    {
+                        case "http":
+                        case "https":
+                            break;
+
+                        default:
+                            throw new ArgumentException("The SSO Metadata Address URL scheme can be 'http' or 'https' only.", nameof(SsoMetadataAddress));
+                    }
+                }
+
+                _ssoMetadataAddress = value;
+            }
+        }
+
+        public bool SsoAllowSignup
+        {
+            get { return _ssoAllowSignup; }
+            set { _ssoAllowSignup = value; }
+        }
+
+        public bool SsoAllowSignupOnlyForMappedUsers
+        {
+            get { return _ssoAllowSignupOnlyForMappedUsers; }
+            set { _ssoAllowSignupOnlyForMappedUsers = value; }
+        }
+
+        public IReadOnlyDictionary<string, string> SsoGroupMap
+        {
+            get { return _ssoGroupMap; }
+            set
+            {
+                if (value is not null)
+                {
+                    if (value.Count == 0)
+                        value = null;
+                    else if (value.Count > 255)
+                        throw new ArgumentException("The SSO Group Map cannot have more than 255 entries.", nameof(SsoGroupMap));
+                }
+
+                _ssoGroupMap = value;
+            }
+        }
+
+        public bool SsoManagedGroups
+        { get { return _ssoGroupMap is not null; } }
 
         #endregion
     }
