@@ -472,6 +472,42 @@ namespace DnsServerCore.Cluster
             }
         }
 
+        public async Task CreateSsoUserAsync(string ssoIdentifier, string username, string displayName = null, IReadOnlyCollection<string> memberOfGroups = null, CancellationToken cancellationToken = default)
+        {
+            HttpApiClient apiClient = GetApiClient();
+
+            try
+            {
+                await apiClient.CreateSsoUserAsync(ssoIdentifier, username, displayName, memberOfGroups, cancellationToken);
+
+                _lastSeen = DateTime.UtcNow;
+                _state = ClusterNodeState.Connected;
+            }
+            catch
+            {
+                _state = ClusterNodeState.Unreachable;
+                throw;
+            }
+        }
+
+        public async Task SetSsoUserAsync(string username, string newUsername = null, string displayName = null, IReadOnlyCollection<string> memberOfGroups = null, CancellationToken cancellationToken = default)
+        {
+            HttpApiClient apiClient = GetApiClient();
+
+            try
+            {
+                await apiClient.SetSsoUserAsync(username, newUsername, displayName, memberOfGroups, cancellationToken);
+
+                _lastSeen = DateTime.UtcNow;
+                _state = ClusterNodeState.Connected;
+            }
+            catch
+            {
+                _state = ClusterNodeState.Unreachable;
+                throw;
+            }
+        }
+
         public async Task<ClusterInfo> GetClusterStateAsync(CancellationToken cancellationToken = default)
         {
             HttpApiClient apiClient = GetApiClient();
