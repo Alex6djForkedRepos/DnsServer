@@ -45,6 +45,8 @@ namespace DnsServerCore.Auth
 
         string _displayName;
         string _username;
+        bool _isSsoUser;
+        string _ssoIdentifier;
         UserPasswordHashType _passwordHashType;
         int _iterations;
         byte[] _salt;
@@ -65,13 +67,8 @@ namespace DnsServerCore.Auth
 
         #region constructor
 
-        public User(string displayName, string username, string password, int iterations = DEFAULT_ITERATIONS)
+        private User()
         {
-            Username = username;
-            DisplayName = displayName;
-
-            ChangePassword(password, iterations);
-
             _previousSessionRemoteAddress = IPAddress.Any;
             _recentSessionRemoteAddress = IPAddress.Any;
 
@@ -85,20 +82,32 @@ namespace DnsServerCore.Auth
             {
                 case 1:
                 case 2:
+                case 3:
                     _displayName = bR.BaseStream.ReadShortString();
                     _username = bR.BaseStream.ReadShortString();
-                    _passwordHashType = (UserPasswordHashType)bR.ReadByte();
-                    _iterations = bR.ReadInt32();
-                    _salt = bR.ReadBuffer();
-                    _passwordHash = bR.BaseStream.ReadShortString();
 
-                    if (version >= 2)
+                    if (version >= 3)
+                        _isSsoUser = bR.ReadBoolean();
+
+                    if (_isSsoUser)
                     {
-                        string otpKeyUri = bR.ReadString();
-                        if (!string.IsNullOrEmpty(otpKeyUri))
-                            _totpKeyUri = AuthenticatorKeyUri.Parse(otpKeyUri);
+                        _ssoIdentifier = bR.BaseStream.ReadShortString();
+                    }
+                    else
+                    {
+                        _passwordHashType = (UserPasswordHashType)bR.ReadByte();
+                        _iterations = bR.ReadInt32();
+                        _salt = bR.ReadBuffer();
+                        _passwordHash = bR.BaseStream.ReadShortString();
 
-                        _totpEnabled = bR.ReadBoolean();
+                        if (version >= 2)
+                        {
+                            string otpKeyUri = bR.ReadString();
+                            if (!string.IsNullOrEmpty(otpKeyUri))
+                                _totpKeyUri = AuthenticatorKeyUri.Parse(otpKeyUri);
+
+                            _totpEnabled = bR.ReadBoolean();
+                        }
                     }
 
                     _disabled = bR.ReadBoolean();
@@ -128,7 +137,95 @@ namespace DnsServerCore.Auth
 
         #endregion
 
+        #region static
+
+        public static User CreateLocalUser(string displayName, string username, string password, int iterations = DEFAULT_ITERATIONS)
+        {
+            User user = new User();
+
+            user.SetUsername(username);
+            user.DisplayName = displayName;
+
+            user.ChangePassword(password, iterations);
+
+            return user;
+        }
+
+        public static User CreateSsoUser(string displayName, string username, string ssoIdentifier)
+        {
+            User user = new User();
+
+            user.SetUsername(username);
+            user.DisplayName = displayName;
+            user._isSsoUser = true;
+            user._ssoIdentifier = ssoIdentifier;
+
+            return user;
+        }
+
+        public static bool IsUsernameValid(string username, bool throwException = false)
+        {
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                if (throwException)
+                    throw new ArgumentException("Username cannot be null or empty.", nameof(Username));
+
+                return false;
+            }
+
+            if (username.Length > 255)
+            {
+                if (throwException)
+                    throw new ArgumentException("Username length cannot exceed 255 characters.", nameof(Username));
+
+                return false;
+            }
+
+            foreach (char c in username)
+            {
+                if ((c >= 97) && (c <= 122)) //[a-z]
+                    continue;
+
+                if ((c >= 65) && (c <= 90)) //[A-Z]
+                    continue;
+
+                if ((c >= 48) && (c <= 57)) //[0-9]
+                    continue;
+
+                if (c == '@')
+                    continue;
+
+                if (c == '-')
+                    continue;
+
+                if (c == '_')
+                    continue;
+
+                if (c == '.')
+                    continue;
+
+                if (throwException)
+                    throw new ArgumentException("Username can contain only alpha numeric, '@', '-', '_', or '.' characters.", nameof(Username));
+
+                return false;
+            }
+
+            return true;
+        }
+
+        #endregion
+
         #region internal
+
+        internal void SetUsername(string username)
+        {
+            if (_passwordHashType == UserPasswordHashType.OldScheme)
+                throw new InvalidOperationException("Cannot change username when using old password hash scheme. Change password once and try again.");
+
+            IsUsernameValid(username, true);
+
+            _username = username.ToLowerInvariant();
+        }
 
         internal void RenameGroup(string oldName)
         {
@@ -160,6 +257,9 @@ namespace DnsServerCore.Auth
 
         public void ChangePassword(string newPassword, int iterations = DEFAULT_ITERATIONS)
         {
+            if (_isSsoUser)
+                throw new InvalidOperationException("Cannot change password for SSO users.");
+
             _passwordHashType = UserPasswordHashType.PBKDF2_SHA256;
             _iterations = iterations;
 
@@ -171,12 +271,18 @@ namespace DnsServerCore.Auth
 
         public void LoadOldSchemeCredentials(string passwordHash)
         {
+            if (_isSsoUser)
+                throw new InvalidOperationException();
+
             _passwordHashType = UserPasswordHashType.OldScheme;
             _passwordHash = passwordHash;
         }
 
         public AuthenticatorKeyUri InitializedTOTP(string issuer)
         {
+            if (_isSsoUser)
+                throw new InvalidOperationException("Time-based one-time password (TOTP) feature is not available for SSO users.");
+
             if (_totpEnabled)
                 throw new InvalidOperationException("Time-based one-time password (TOTP) is already enabled for user: " + _username);
 
@@ -187,6 +293,9 @@ namespace DnsServerCore.Auth
 
         public void EnableTOTP(string totp)
         {
+            if (_isSsoUser)
+                throw new InvalidOperationException("Time-based one-time password (TOTP) feature is not available for SSO users.");
+
             if (_totpKeyUri is null)
                 throw new InvalidOperationException("Time-based one-time password (TOTP) was not initialized for user: " + _username);
 
@@ -203,6 +312,9 @@ namespace DnsServerCore.Auth
 
         public void DisableTOTP()
         {
+            if (_isSsoUser)
+                throw new InvalidOperationException("Time-based one-time password (TOTP) feature is not available for SSO users.");
+
             if (!_totpEnabled)
                 throw new InvalidOperationException("Time-based one-time password (TOTP) is already disabled for user: " + _username);
 
@@ -259,20 +371,31 @@ namespace DnsServerCore.Auth
 
         public void WriteTo(BinaryWriter bW)
         {
-            bW.Write((byte)2);
+            bW.Write((byte)3);
+
             bW.BaseStream.WriteShortString(_displayName);
             bW.BaseStream.WriteShortString(_username);
-            bW.Write((byte)_passwordHashType);
-            bW.Write(_iterations);
-            bW.WriteBuffer(_salt);
-            bW.BaseStream.WriteShortString(_passwordHash);
+            bW.Write(_isSsoUser);
 
-            if (_totpKeyUri is null)
-                bW.Write("");
+            if (_isSsoUser)
+            {
+                bW.BaseStream.WriteShortString(_ssoIdentifier);
+            }
             else
-                bW.Write(_totpKeyUri.ToString());
+            {
+                bW.Write((byte)_passwordHashType);
+                bW.Write(_iterations);
+                bW.WriteBuffer(_salt);
+                bW.BaseStream.WriteShortString(_passwordHash);
 
-            bW.Write(_totpEnabled);
+                if (_totpKeyUri is null)
+                    bW.Write("");
+                else
+                    bW.Write(_totpKeyUri.ToString());
+
+                bW.Write(_totpEnabled);
+            }
+
             bW.Write(_disabled);
             bW.Write(_sessionTimeoutSeconds);
 
@@ -329,45 +452,13 @@ namespace DnsServerCore.Auth
         }
 
         public string Username
-        {
-            get { return _username; }
-            set
-            {
-                if (_passwordHashType == UserPasswordHashType.OldScheme)
-                    throw new InvalidOperationException("Cannot change username when using old password hash scheme. Change password once and try again.");
+        { get { return _username; } }
 
-                if (string.IsNullOrWhiteSpace(value))
-                    throw new ArgumentException("Username cannot be null or empty.", nameof(Username));
+        public bool IsSsoUser
+        { get { return _isSsoUser; } }
 
-                if (value.Length > 255)
-                    throw new ArgumentException("Username length cannot exceed 255 characters.", nameof(Username));
-
-                foreach (char c in value)
-                {
-                    if ((c >= 97) && (c <= 122)) //[a-z]
-                        continue;
-
-                    if ((c >= 65) && (c <= 90)) //[A-Z]
-                        continue;
-
-                    if ((c >= 48) && (c <= 57)) //[0-9]
-                        continue;
-
-                    if (c == '-')
-                        continue;
-
-                    if (c == '_')
-                        continue;
-
-                    if (c == '.')
-                        continue;
-
-                    throw new ArgumentException("Username can contain only alpha numeric, '-', '_', or '.' characters.", nameof(Username));
-                }
-
-                _username = value.ToLowerInvariant();
-            }
-        }
+        public string SsoIdentifier
+        { get { return _ssoIdentifier; } }
 
         public UserPasswordHashType PasswordHashType
         { get { return _passwordHashType; } }
