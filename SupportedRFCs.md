@@ -27,6 +27,7 @@ The following is a list of RFCs that Technitium DNS Server implements.
 | RFC 4509 | Use of SHA-256 in DNSSEC Delegation Signer (DS) Resource Records (RRs)
 | RFC 4592 | The Role of Wildcards in the Domain Name System
 | RFC 4635 | HMAC SHA (Hashed Message Authentication Code, Secure Hash Algorithm) TSIG Algorithm Identifiers
+| RFC 4697 | Observed DNS Resolution Misbehavior
 | RFC 5155 | DNS Security (DNSSEC) Hashed Authenticated Denial of Existence
 | RFC 5452 | Measures for Making DNS More Resilient against Forged Answers
 | RFC 5702 | Use of SHA-2 Algorithms with RSA in DNSKEY and RRSIG Resource Records for DNSSEC
@@ -68,6 +69,7 @@ The following is a list of RFCs that Technitium DNS Server implements.
 | RFC 9250 | DNS over Dedicated QUIC Connections 
 | RFC 9276 | Guidance for NSEC3 Parameter Settings
 | RFC 9432 | DNS Catalog Zones
+| RFC 9520 | Negative Caching of DNS Resolution Failures
 | RFC 9460 | Service Binding and Parameter Specification via the DNS (SVCB and HTTPS Resource Records) 
 | draft-vixie-dnsext-dns0x20 | Use of Bit 0x20 in DNS Labels to Improve Transaction Identity
 
