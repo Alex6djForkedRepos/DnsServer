@@ -91,7 +91,7 @@ namespace DnsServerCore.ApplicationCommon
         /// <summary>
         /// The proxy server setting on the DNS server to be used when required to make any outbound network connection.
         /// </summary>
-        NetProxy Proxy { get; }
+        NetProxy? Proxy { get; }
 
         /// <summary>
         /// The IPv6 mode configured on the DNS server.
