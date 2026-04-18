@@ -83,7 +83,7 @@ namespace QueryLogsMySql
                             {
                                 command.CommandText = "SELECT Count(*) FROM dns_logs;";
 
-                                totalRecords = Convert.ToInt32(await command.ExecuteScalarAsync() ?? 0);
+                                totalRecords = Convert.ToInt32(await command.ExecuteScalarAsync());
                             }
 
                             int recordsToRemove = totalRecords - _maxLogRecords;
@@ -227,6 +227,7 @@ namespace QueryLogsMySql
                             else
                                 sb.Append($", (@server{i}, @timestamp{i}, @client_ip{i}, @protocol{i}, @response_type{i}, @response_rtt{i}, @rcode{i}, @qname{i}, @qtype{i}, @qclass{i}, @answer{i})");
                         }
+
                         command.CommandText = sb.ToString();
 
                         for (int i = 0; i < logs.Count; i++)
@@ -241,7 +242,7 @@ namespace QueryLogsMySql
                             MySqlParameter paramResponseRtt = command.Parameters.Add("@response_rtt" + i, MySqlDbType.Double);
                             MySqlParameter paramRcode = command.Parameters.Add("@rcode" + i, MySqlDbType.Byte);
                             MySqlParameter paramQname = command.Parameters.Add("@qname" + i, MySqlDbType.VarChar);
-                            MySqlParameter paramQtype = command.Parameters.Add("@qtype" + i, MySqlDbType.Int16);
+                            MySqlParameter paramQtype = command.Parameters.Add("@qtype" + i, MySqlDbType.UInt16);
                             MySqlParameter paramQclass = command.Parameters.Add("@qclass" + i, MySqlDbType.Int16);
                             MySqlParameter paramAnswer = command.Parameters.Add("@answer" + i, MySqlDbType.VarChar);
 
@@ -271,7 +272,7 @@ namespace QueryLogsMySql
                                 DnsQuestionRecord query = log.Request.Question[0];
 
                                 paramQname.Value = query.Name.ToLowerInvariant();
-                                paramQtype.Value = (short)query.Type;
+                                paramQtype.Value = (ushort)query.Type;
                                 paramQclass.Value = (short)query.Class;
                             }
                             else
@@ -381,7 +382,7 @@ CREATE TABLE IF NOT EXISTS dns_logs
     response_rtt REAL,
     rcode TINYINT NOT NULL,
     qname VARCHAR(255),
-    qtype SMALLINT,
+    qtype SMALLINT UNSIGNED,
     qclass SMALLINT,
     answer VARCHAR(4000)
 );
@@ -405,6 +406,18 @@ CREATE TABLE IF NOT EXISTS dns_logs
                             await using (MySqlCommand command = connection.CreateCommand())
                             {
                                 command.CommandText = "ALTER TABLE dns_logs MODIFY protocol TINYINT UNSIGNED NOT NULL;";
+
+                                try
+                                {
+                                    await command.ExecuteNonQueryAsync();
+                                }
+                                catch
+                                { }
+                            }
+
+                            await using (MySqlCommand command = connection.CreateCommand())
+                            {
+                                command.CommandText = "ALTER TABLE dns_logs MODIFY qtype SMALLINT UNSIGNED;";
 
                                 try
                                 {
@@ -764,7 +777,7 @@ CREATE TABLE IF NOT EXISTS dns_logs
                         command.Parameters.AddWithValue("@qname", qname);
 
                     if (qtype is not null)
-                        command.Parameters.AddWithValue("@qtype", (short)qtype);
+                        command.Parameters.AddWithValue("@qtype", (ushort)qtype);
 
                     if (qclass is not null)
                         command.Parameters.AddWithValue("@qclass", (short)qclass);
@@ -798,7 +811,7 @@ SELECT
     answer
 FROM
     dns_logs
-" + (string.IsNullOrEmpty(whereClause) ? "" : "WHERE " + whereClause + " ") + @"
+" + (string.IsNullOrEmpty(whereClause) ? "" : "WHERE " + whereClause) + @"
 ORDER BY dlid" + (descendingOrder ? " DESC" : "") + @"
 LIMIT @limit OFFSET @offset";
 
@@ -827,7 +840,7 @@ LIMIT @limit OFFSET @offset";
                         command.Parameters.AddWithValue("@qname", qname);
 
                     if (qtype is not null)
-                        command.Parameters.AddWithValue("@qtype", (short)qtype);
+                        command.Parameters.AddWithValue("@qtype", (ushort)qtype);
 
                     if (qclass is not null)
                         command.Parameters.AddWithValue("@qclass", (short)qclass);
@@ -850,7 +863,7 @@ LIMIT @limit OFFSET @offset";
                             if (reader.IsDBNull(7))
                                 question = null;
                             else
-                                question = new DnsQuestionRecord(reader.GetString(7), (DnsResourceRecordType)reader.GetInt16(8), (DnsClass)reader.GetInt16(9), false);
+                                question = new DnsQuestionRecord(reader.GetString(7), (DnsResourceRecordType)reader.GetInt32(8), (DnsClass)reader.GetInt16(9), false);
 
                             string? answer;
 
