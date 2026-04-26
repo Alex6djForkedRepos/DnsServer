@@ -483,17 +483,24 @@ namespace DnsServerCore.Auth
 
                         {
                             int count = bR.ReadByte();
-                            Dictionary<string, string> ssoGroupMap = new Dictionary<string, string>(count);
-
-                            for (int i = 0; i < count; i++)
+                            if (count > 0)
                             {
-                                string key = s.ReadShortString();
-                                string value = s.ReadShortString();
+                                Dictionary<string, string> ssoGroupMap = new Dictionary<string, string>(count);
 
-                                ssoGroupMap.TryAdd(key, value);
+                                for (int i = 0; i < count; i++)
+                                {
+                                    string key = s.ReadShortString();
+                                    string value = s.ReadShortString();
+
+                                    ssoGroupMap.TryAdd(key, value);
+                                }
+
+                                _ssoGroupMap = ssoGroupMap;
                             }
-
-                            _ssoGroupMap = ssoGroupMap;
+                            else
+                            {
+                                _ssoGroupMap = null;
+                            }
                         }
 
                         restartWebService = !ssoIsStillDisabled && restartWebService;
@@ -551,6 +558,7 @@ namespace DnsServerCore.Auth
                     switch (session.Value.Type)
                     {
                         case UserSessionType.ApiToken:
+                        case UserSessionType.ClusterApiToken:
                             _sessions[session.Key] = session.Value;
                             break;
                     }
